@@ -23,7 +23,7 @@
 ## 整体架构
 
 ```text
-每晚定时（北京时间约 02:00）
+每晚定时（北京时间 03:00–05:00 之间的随机时刻）
         │
         ▼
 Playwright 只读冒烟
@@ -121,9 +121,11 @@ npm run report
 
 工作流在三种情况下运行：
 
-- 每晚 UTC 18:00（`cron: '0 18 * * *'`）。对应北京时间 02:00。中国标准时间 UTC+8，没有夏令时。
+- 每晚定时。cron 只能写固定时刻，这里写的是 UTC：`0 19 * * *`。中国标准时间 UTC+8、没有夏令时，所以这是北京时间 03:00。真正跑测试的时间不固定在 3 点：只有 `schedule` 会再随机等到当天北京时间 03:00–05:00（含两端）里的一个时刻。`workflow_dispatch` 和 `pull_request` 不等待，立刻跑。
 - `workflow_dispatch` 手动触发。可选输入 `offset_days`（7～14，默认 10）。
 - `pull_request`。
+
+等待放在单独的 job 里，超时 130 分钟，盖住 120 分钟的窗口。访问航司的测试 job 仍是 20 分钟，并且只在测试阶段串行，避免等待的两小时挡住 PR。
 
 成功时用 `actions/upload-artifact` 上传 `evidence/baseline/`（artifact 名 `mandarin-success-baseline-<run_id>`）。失败时上传 `evidence/failure/` 和 Playwright HTML 报告（`mandarin-failure-evidence-<run_id>`），里面有全页截图、HTML 和 `error.txt`。保留 14 天。
 
