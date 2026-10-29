@@ -1,0 +1,78 @@
+name: nightly-mandarin-smoke
+
+# 每晚定时：北京时间 02:00 左右。
+# 中国标准时间是 UTC+8，全年无夏令时，所以北京时间 02:00 = UTC 18:00。
+# GitHub Actions 的 cron 一律按 UTC 计算。
+# 另外：pull_request 上跑，以及 workflow_dispatch 可手动触发。
+on:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+    inputs:
+      offset_days:
+        description: '出发日 = 台北今天 + N 天（7-14，默认 10）'
+        required: false
+        default: '10'
+  pull_request:
+
+# 全局串行，避免定时任务和 PR 同时打到航司网站。
+concurrency:
+  group: mandarin-readonly-smoke
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: mandarin-readonly-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # 手动触发时用输入值；定时和 PR 没有 input，固定为 10（落在 7～14）。
+      DEPARTURE_OFFSET_DAYS: ${{ github.event.inputs.offset_days || '10' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-1.64.1
+
+      - name: Install dependencies
+        run: npm ci
+
+      # 只装 Chromium。每次运行最多两次查票导航（结果页 GET + 首页表单提交），0 重试、1 worker。
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run read-only smoke tests
+        run: npx playwright test
+
+      - name: Upload failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mandarin-failure-evidence-${{ github.run_id }}
+          path: |
+            evidence/failure/
+            playwright-report/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload success baseline
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mandarin-success-baseline-${{ github.run_id }}
+          path: evidence/baseline/
+          retention-days: 14
+          if-no-files-found: warn
