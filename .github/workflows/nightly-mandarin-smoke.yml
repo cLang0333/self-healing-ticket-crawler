@@ -1,0 +1,123 @@
+name: nightly-mandarin-smoke
+
+# 定时触发点：北京时间 03:00。
+# 中国标准时间是 UTC+8，全年无夏令时，所以北京时间 03:00 = UTC 19:00。
+# GitHub Actions 的 cron 一律按 UTC 计算，也不能写随机分钟。
+# schedule 会先等到当天北京时间 03:00–05:00 之间的一个随机时刻，再跑测试。
+# pull_request 和 workflow_dispatch 不经过等待，立刻跑。
+on:
+  schedule:
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+    inputs:
+      offset_days:
+        description: '出发日 = 台北今天 + N 天（7-14，默认 10）'
+        required: false
+        default: '10'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # 只在 schedule 时占用一个 runner 做等待。超时要盖住整整 120 分钟，再留几分钟给定时偏差。
+  # 并发锁放在真正跑测试的 job 上，避免这两小时把 PR 或手动触发堵住。
+  wait-for-window:
+    name: random-wait
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 130
+    steps:
+      - name: Sleep until a random time in Beijing 03:00-05:00
+        run: |
+          set -euo pipefail
+          window_start=$(TZ=Asia/Shanghai date -d 'today 03:00:00' +%s)
+          window_end=$(TZ=Asia/Shanghai date -d 'today 05:00:00' +%s)
+          now=$(date +%s)
+          span=$((window_end - window_start))
+          if [ "$span" -le 0 ]; then
+            echo "Beijing window is empty: start=${window_start} end=${window_end}"
+            exit 1
+          fi
+
+          # 0..span（含 05:00:00）。用 30 位随机数再取模，避免 bash RANDOM 直接取模的偏差。
+          modulus=$((span + 1))
+          sample_space=1073741824
+          limit=$((sample_space - (sample_space % modulus)))
+          offset=-1
+          while [ "$offset" -lt 0 ]; do
+            pick=$(( (RANDOM << 15) | RANDOM ))
+            if [ "$pick" -lt "$limit" ]; then
+              offset=$((pick % modulus))
+            fi
+          done
+
+          target=$((window_start + offset))
+          echo "Beijing window $(TZ=Asia/Shanghai date -d "@${window_start}" '+%F %T %Z') – $(TZ=Asia/Shanghai date -d "@${window_end}" '+%F %T %Z')"
+          echo "Random target $(TZ=Asia/Shanghai date -d "@${target}" '+%F %T %Z') (${offset}s after 03:00)"
+          if [ "$now" -ge "$target" ]; then
+            echo "Target is not in the future (now $(TZ=Asia/Shanghai date -d "@${now}" '+%F %T %Z')). Starting the test without further delay."
+            exit 0
+          fi
+          delay=$((target - now))
+          echo "Sleeping ${delay}s"
+          sleep "$delay"
+
+  smoke:
+    name: mandarin-readonly-smoke
+    needs: wait-for-window
+    # schedule 要等随机时刻；PR / 手动触发时 wait job 被跳过，这里仍要立刻跑。
+    if: ${{ !cancelled() && needs.wait-for-window.result != 'failure' }}
+    concurrency:
+      group: mandarin-readonly-smoke
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # 手动触发时用输入值；定时和 PR 没有 input，固定为 10（落在 7～14）。
+      DEPARTURE_OFFSET_DAYS: ${{ github.event.inputs.offset_days || '10' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-1.64.1
+
+      - name: Install dependencies
+        run: npm ci
+
+      # 只装 Chromium。每次运行最多两次查票导航（结果页 GET + 首页表单提交），0 重试、1 worker。
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run read-only smoke tests
+        run: npx playwright test
+
+      - name: Upload failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mandarin-failure-evidence-${{ github.run_id }}
+          path: |
+            evidence/failure/
+            playwright-report/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload success baseline
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mandarin-success-baseline-${{ github.run_id }}
+          path: evidence/baseline/
+          retention-days: 14
+          if-no-files-found: warn
